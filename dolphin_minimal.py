@@ -8,15 +8,16 @@ import random, os, glob, tqdm
 
 device = torch.device('cpu')
 # ---------- 1. 读入数据 ----------
-BASE = '~/Downloads'
+BASE = '~/Downloads/ddqndata'
 print("当前工作目录:", os.getcwd())
 print("匹配到的文件:", glob.glob(os.path.join(BASE, '*process_definition*')))
 dtype = {str(i): 'string' for i in range(100)}   # 先全部当字符串读
 
 def load_data(path):
-    return pd.read_csv(path,
-                 on_bad_lines='skip',   # 忽略异常行
-                 nrows=1000)
+    return pd.read_csv(path
+                # ,on_bad_lines='skip',   # 忽略异常行
+                # nrows=1000
+                       )
 process_def = pd.read_csv(glob.glob(f'{BASE}/*process_definition*')[0])
 # process_def = load_data(glob.glob(f'{BASE}/*process_definition*')[0])
 process_inst = load_data(glob.glob(f'{BASE}/*process_instance*')[0])
@@ -148,50 +149,71 @@ class QNet(nn.Module):
 # ---------- 5. DDQN Agent ----------
 class DDQNAgent:
     def __init__(self, n_states, n_actions, lr=1e-3, gamma=0.99, eps=1.0, eps_min=0.01, eps_decay=0.995):
+        # 动作空间大小
         self.n_actions = n_actions
+        # 折扣因子γ，决定未来奖励的影响
         self.gamma = gamma
+        # 当前探索率ε，控制随机动作概率
         self.eps = eps
+        # 最小探索率，防止ε降为0
         self.eps_min = eps_min
+        # 探索率衰减系数，每次更新后ε乘以该值
         self.eps_decay = eps_decay
+        # 主Q网络，用于估算Q值
         self.q_net = QNet(n_states, n_actions)
+        # 目标Q网络，用于计算目标Q值，提升训练稳定性
         self.q_target = QNet(n_states, n_actions)
+        # 初始化目标网络参数，使其与主Q网络一致
         self.q_target.load_state_dict(self.q_net.state_dict())
+        # Adam优化器，负责更新主Q网络参数
         self.opt = torch.optim.Adam(self.q_net.parameters(), lr=lr)
+        # 经验回放池，保存最近10000条经验
         self.memory = deque(maxlen=10000)
+        # 定义经验元组格式（状态，动作，奖励，下一个状态，是否结束）
         self.Transition = namedtuple('T', ('s', 'a', 'r', 's_', 'd'))
 
     def act(self, state):
+        # ε-贪婪策略：以ε概率随机选动作（探索），否则选Q值最大的动作（利用）
         if random.random() < self.eps:
             return random.randrange(self.n_actions)
         with torch.no_grad():
-            s = torch.tensor(state).unsqueeze(0)
-            return self.q_net(s).argmax().item()
+            s = torch.tensor(state).unsqueeze(0)  # 转为张量并增加batch维
+            return self.q_net(s).argmax().item()  # 选Q值最大的动作
 
     def store(self, *args):
+        # 存储一条经验到回放池
         self.memory.append(self.Transition(*args))
 
     def replay(self, batch=64):
-        if len(self.memory) < batch: return
-        samples = random.sample(self.memory, batch)
-        s, a, r, s_, d = zip(*samples)
+        # 经验回放，采样一批数据进行训练
+        if len(self.memory) < batch: return  # 数据不足时跳过
+        samples = random.sample(self.memory, batch)  # 随机采样batch条经验
+        s, a, r, s_, d = zip(*samples)  # 拆分为各自的分量
         s = torch.tensor(np.array(s))
         s_ = torch.tensor(np.array(s_))
         a = torch.tensor(a)
         r = torch.tensor(r, dtype=torch.float32)
         d = torch.tensor(d, dtype=torch.float32)
 
+        # 计算当前Q值
         q = self.q_net(s).gather(1, a.unsqueeze(1)).squeeze()
         with torch.no_grad():
+            # 计算下一个状态的最大动作
             a_next = self.q_net(s_).argmax(1)
+            # 用目标网络计算下一个状态的Q值
             q_next = self.q_target(s_).gather(1, a_next.unsqueeze(1)).squeeze()
+            # 计算目标Q值
             target = r + self.gamma * q_next * (1 - d)
+        # 均方误差损失
         loss = nn.MSELoss()(q, target)
-        self.opt.zero_grad();
-        loss.backward();
-        self.opt.step()
+        self.opt.zero_grad();  # 梯度清零
+        loss.backward();       # 反向传播
+        self.opt.step()        # 更新参数
 
     def update_target(self):
+        # 更新目标网络参数为主Q网络参数
         self.q_target.load_state_dict(self.q_net.state_dict())
+        # 衰减探索率ε
         self.eps = max(self.eps_min, self.eps * self.eps_decay)
 
 
